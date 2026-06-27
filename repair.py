@@ -14,6 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import (
     COST_HARD_STOP_USD,
+    DEFAULT_BEDROCK_MODEL,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_OPENROUTER_MODEL,
     GEMINI_API_BASE,
@@ -25,6 +26,8 @@ from config import (
     RATE_LIMIT_SLEEP,
     SELF_VERIFICATION_MODE,
 )
+
+import bedrock_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +50,13 @@ def _resolve_provider(model: str):
     has_openrouter_key = bool(os.environ.get(OPENROUTER_API_KEY_ENV))
 
     provider = LLM_PROVIDER
-    if provider not in ("auto", "gemini", "openrouter"):
+    if provider not in ("auto", "gemini", "openrouter", "bedrock"):
         raise RuntimeError(
-            f"Invalid LLM_PROVIDER={provider!r}. Use one of: auto, gemini, openrouter."
+            f"Invalid LLM_PROVIDER={provider!r}. Use one of: auto, gemini, openrouter, bedrock."
         )
+
+    if provider == "bedrock":
+        return "bedrock", None, None
 
     if provider == "auto":
         if has_gemini_key and not has_openrouter_key:
@@ -106,7 +112,23 @@ def _resolve_model_name(model: str):
     provider, _, _ = _resolve_provider(explicit)
     if provider == "gemini":
         return DEFAULT_GEMINI_MODEL
+    if provider == "bedrock":
+        return DEFAULT_BEDROCK_MODEL
     return DEFAULT_OPENROUTER_MODEL
+
+
+def _provider_for(model: str) -> str:
+    """
+    Return resolved provider name for a model id.
+
+    Args:
+        model: Requested model id. May be empty.
+
+    Returns:
+        Provider string: gemini, openrouter, or bedrock.
+    """
+    provider, _, _ = _resolve_provider(model)
+    return provider
 
 
 def _get_client(model: str):
@@ -193,6 +215,18 @@ def call_llm(
         raise RuntimeError(f"Cost hard stop hit: ${running_cost_usd:.2f}")
     time.sleep(RATE_LIMIT_SLEEP)
     request_messages = messages or [{"role": "user", "content": prompt}]
+    if _provider_for(resolved_model) == "bedrock":
+        try:
+            content = bedrock_client.bedrock_chat(resolved_model, request_messages)
+        except Exception as e:
+            logger.exception("call_llm bedrock failed: %s", e)
+            logger.warning("call_llm retry due to exception")
+            raise
+        if content is None:
+            _log_call(resolved_model, 0, 0, 0.0)
+            return None
+        _log_call(resolved_model, 0, 0, 0.0)
+        return content
     try:
         response = _get_client(resolved_model).chat.completions.create(
             model=resolved_model,
@@ -375,7 +409,8 @@ def get_self_verification_score(problem: str, code: str, model: str):
     )
     mode = (SELF_VERIFICATION_MODE or "auto").strip().lower()
     resolved_model = _resolve_model_name(model)
-    if mode in ("auto", "logprobs"):
+    provider = _provider_for(resolved_model)
+    if provider != "bedrock" and mode in ("auto", "logprobs"):
         try:
             response = _get_client(resolved_model).chat.completions.create(
                 model=resolved_model,
@@ -396,7 +431,7 @@ def get_self_verification_score(problem: str, code: str, model: str):
             logger.info("self-verification logprobs path failed, falling back: %s", e)
             if mode == "logprobs":
                 return 0.5
-    if mode in ("auto", "json"):
+    if provider != "bedrock" and mode in ("auto", "json"):
         try:
             response = _get_client(resolved_model).chat.completions.create(
                 model=resolved_model,

@@ -11,7 +11,7 @@ from typing import Any
 from tqdm import tqdm
 
 from analyze import print_summary, run_full_analysis, save_full_results
-from config import MAX_EVAL_STEPS, MODELS, N_PROBLEMS, RESULTS_DIR, SUPPORTED_STRATEGIES
+from config import LLM_PROVIDER, MAX_EVAL_STEPS, MODELS, MODELS_BEDROCK, N_PROBLEMS, RESULTS_DIR, SUPPORTED_STRATEGIES
 from data_lcb import get_problems
 from figures import generate_all_figures
 from strategies import STRATEGY_REGISTRY
@@ -75,7 +75,11 @@ def main() -> None:
         print(json.dumps(outputs, indent=2))
         return
 
-    selected_models = [args.model] if args.model else MODELS
+    selected_models = (
+        [args.model]
+        if args.model
+        else (MODELS_BEDROCK if LLM_PROVIDER == "bedrock" else MODELS)
+    )
     selected_strategies = [args.strategy] if args.strategy else list(SUPPORTED_STRATEGIES)
     for strategy_name in selected_strategies:
         if strategy_name not in STRATEGY_REGISTRY:

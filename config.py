@@ -3,9 +3,10 @@
 import os
 
 # Provider selection:
-# - "auto": choose from available API keys (recommended)
+# - "auto": choose from available API keys (recommended; does not auto-select bedrock)
 # - "gemini": force Google AI Studio Gemini endpoint
 # - "openrouter": force OpenRouter endpoint
+# - "bedrock": force AWS Bedrock Converse (boto3; requires IAM or AWS credentials)
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "auto").strip().lower()
 
 # Optional explicit model override via env var MODEL.
@@ -15,6 +16,10 @@ MODEL = os.environ.get("MODEL", "").strip()
 # Provider defaults (used when MODEL is empty).
 DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
+DEFAULT_BEDROCK_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
+
+# AWS Bedrock (boto3 Converse)
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("BEDROCK_REGION") or "us-east-2"
 
 # OpenAI-compatible endpoints
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -63,6 +68,14 @@ MODELS = [
     "anthropic/claude-3.5-haiku",
     "openai/gpt-4o",
     "deepseek/deepseek-reasoner",
+]
+
+MODELS_BEDROCK = [
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "amazon.nova-lite-v1:0",
+    "amazon.nova-pro-v1:0",
+    "meta.llama3-1-70b-instruct-v1:0",
 ]
 
 DATA_DIR = "data/trajectories"
