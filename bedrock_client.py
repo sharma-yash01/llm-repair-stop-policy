@@ -72,7 +72,8 @@ def bedrock_chat(
     model_id: str,
     messages: list[dict[str, str]],
     max_tokens: int | None = None,
-) -> str | None:
+    additional_request_fields: dict[str, Any] | None = None,
+) -> tuple[str | None, int, int]:
     """
     Call Bedrock Converse API with OpenAI-style messages.
 
@@ -80,9 +81,10 @@ def bedrock_chat(
         model_id: Bedrock model ID (e.g. anthropic.claude-3-5-haiku-20241022-v1:0).
         messages: OpenAI-style message list.
         max_tokens: Optional max output tokens.
+        additional_request_fields: Optional reasoning/toggle fields for Converse.
 
     Returns:
-        Assistant text, or None when empty.
+        Tuple of (assistant text or None, input_tokens, output_tokens).
     """
     converse_messages, system = _to_converse_messages(messages)
     if not converse_messages:
@@ -95,6 +97,8 @@ def bedrock_chat(
     }
     if system is not None:
         kwargs["system"] = system
+    if additional_request_fields is not None:
+        kwargs["additionalModelRequestFields"] = additional_request_fields
 
     try:
         response = _get_bedrock_client().converse(**kwargs)
@@ -103,10 +107,12 @@ def bedrock_chat(
         raise
 
     usage = response.get("usage") or {}
+    input_tokens = int(usage.get("inputTokens", 0))
+    output_tokens = int(usage.get("outputTokens", 0))
     logger.debug(
         "bedrock_usage model=%s input_tokens=%s output_tokens=%s",
         model_id,
-        usage.get("inputTokens", 0),
-        usage.get("outputTokens", 0),
+        input_tokens,
+        output_tokens,
     )
-    return _extract_text(response)
+    return _extract_text(response), input_tokens, output_tokens

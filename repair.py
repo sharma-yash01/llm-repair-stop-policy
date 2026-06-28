@@ -25,8 +25,11 @@ from config import (
     OPENROUTER_API_KEY_ENV,
     RATE_LIMIT_SLEEP,
     SELF_VERIFICATION_MODE,
+    get_model_config,
+    get_reasoning_fields,
 )
 
+import anthropic_client
 import bedrock_client
 
 logger = logging.getLogger(__name__)
@@ -117,18 +120,77 @@ def _resolve_model_name(model: str):
     return DEFAULT_OPENROUTER_MODEL
 
 
+def _resolve_call_context(
+    model: str,
+) -> tuple[str, str, dict[str, Any] | None, float, float, str]:
+    """
+    Resolve route, API model id, reasoning fields, pricing, and log label.
+
+    Args:
+        model: Registry label or legacy model id.
+
+    Returns:
+        Tuple of (route, api_model_id, reasoning_fields, price_in, price_out, log_label).
+    """
+    label = (model or "").strip()
+    cfg = get_model_config(label)
+    if cfg is not None:
+        return (
+            str(cfg["route"]),
+            str(cfg["model_id"]),
+            get_reasoning_fields(cfg.get("reasoning")),
+            float(cfg.get("price_in", 0.0)),
+            float(cfg.get("price_out", 0.0)),
+            label,
+        )
+    api_model = _resolve_model_name(model)
+    provider = _legacy_provider_for(api_model)
+    return provider, api_model, None, 0.0, 0.0, api_model
+
+
+def _estimate_cost_usd(
+    prompt_tokens: int,
+    completion_tokens: int,
+    price_in: float,
+    price_out: float,
+) -> float:
+    """
+    Estimate call cost from per-million token prices.
+
+    Args:
+        prompt_tokens: Input token count.
+        completion_tokens: Output token count.
+        price_in: USD per 1M input tokens.
+        price_out: USD per 1M output tokens.
+
+    Returns:
+        Estimated cost in USD.
+    """
+    if price_in <= 0.0 and price_out <= 0.0:
+        return 0.0
+    return (prompt_tokens * price_in + completion_tokens * price_out) / 1_000_000.0
+
+
+def _legacy_provider_for(model: str) -> str:
+    provider, _, _ = _resolve_provider(model)
+    return provider
+
+
 def _provider_for(model: str) -> str:
     """
-    Return resolved provider name for a model id.
+    Return resolved provider/route name for a model id.
 
     Args:
         model: Requested model id. May be empty.
 
     Returns:
-        Provider string: gemini, openrouter, or bedrock.
+        Provider string: gemini, openrouter, bedrock, or anthropic.
     """
-    provider, _, _ = _resolve_provider(model)
-    return provider
+    label = (model or "").strip()
+    cfg = get_model_config(label)
+    if cfg is not None:
+        return str(cfg["route"])
+    return _legacy_provider_for(_resolve_model_name(model))
 
 
 def _get_client(model: str):
@@ -210,23 +272,49 @@ def call_llm(
         RuntimeError: If running cost exceeds COST_HARD_STOP_USD.
     """
     global running_cost_usd
-    resolved_model = _resolve_model_name(model)
+    route, api_model, reasoning_fields, price_in, price_out, log_label = _resolve_call_context(
+        model
+    )
     if running_cost_usd >= COST_HARD_STOP_USD:
         raise RuntimeError(f"Cost hard stop hit: ${running_cost_usd:.2f}")
     time.sleep(RATE_LIMIT_SLEEP)
     request_messages = messages or [{"role": "user", "content": prompt}]
-    if _provider_for(resolved_model) == "bedrock":
+    if route == "bedrock":
         try:
-            content = bedrock_client.bedrock_chat(resolved_model, request_messages)
+            content, prompt_tokens, completion_tokens = bedrock_client.bedrock_chat(
+                api_model,
+                request_messages,
+                additional_request_fields=reasoning_fields,
+            )
         except Exception as e:
             logger.exception("call_llm bedrock failed: %s", e)
             logger.warning("call_llm retry due to exception")
             raise
+        cost = _estimate_cost_usd(prompt_tokens, completion_tokens, price_in, price_out)
+        running_cost_usd += cost
         if content is None:
-            _log_call(resolved_model, 0, 0, 0.0)
+            _log_call(log_label, prompt_tokens, completion_tokens, cost)
             return None
-        _log_call(resolved_model, 0, 0, 0.0)
+        _log_call(log_label, prompt_tokens, completion_tokens, cost)
         return content
+    if route == "anthropic":
+        try:
+            content, prompt_tokens, completion_tokens = anthropic_client.anthropic_chat(
+                api_model,
+                request_messages,
+            )
+        except Exception as e:
+            logger.exception("call_llm anthropic failed: %s", e)
+            logger.warning("call_llm retry due to exception")
+            raise
+        cost = _estimate_cost_usd(prompt_tokens, completion_tokens, price_in, price_out)
+        running_cost_usd += cost
+        if content is None:
+            _log_call(log_label, prompt_tokens, completion_tokens, cost)
+            return None
+        _log_call(log_label, prompt_tokens, completion_tokens, cost)
+        return content
+    resolved_model = api_model
     try:
         response = _get_client(resolved_model).chat.completions.create(
             model=resolved_model,
@@ -241,10 +329,8 @@ def call_llm(
         if isinstance(content, str):
             content = content.strip() or None
         if content is None:
-            _log_call(resolved_model, 0, 0, 0.0)
+            _log_call(log_label, 0, 0, 0.0)
             return None
-        cost = 0.0
-        running_cost_usd += cost
         usage = getattr(response, "usage", None)
         if usage is not None and hasattr(usage, "prompt_tokens"):
             prompt_tokens = getattr(usage, "prompt_tokens", 0)
@@ -254,11 +340,13 @@ def call_llm(
             completion_tokens = usage.get("completion_tokens", 0)
         else:
             prompt_tokens = completion_tokens = 0
-        _log_call(resolved_model, prompt_tokens, completion_tokens, cost)
+        cost = _estimate_cost_usd(prompt_tokens, completion_tokens, price_in, price_out)
+        running_cost_usd += cost
+        _log_call(log_label, prompt_tokens, completion_tokens, cost)
         return content
     except (IndexError, AttributeError, TypeError) as e:
         logger.warning("llm_bad_response_shape %s", e)
-        _log_call(resolved_model, 0, 0, 0.0)
+        _log_call(log_label, 0, 0, 0.0)
         return None
 
 
@@ -408,12 +496,12 @@ def get_self_verification_score(problem: str, code: str, model: str):
         "Will this code pass all tests? Answer Yes or No only."
     )
     mode = (SELF_VERIFICATION_MODE or "auto").strip().lower()
-    resolved_model = _resolve_model_name(model)
-    provider = _provider_for(resolved_model)
-    if provider != "bedrock" and mode in ("auto", "logprobs"):
+    provider = _provider_for(model)
+    _, api_model, _, _, _, _ = _resolve_call_context(model)
+    if provider not in ("bedrock", "anthropic") and mode in ("auto", "logprobs"):
         try:
-            response = _get_client(resolved_model).chat.completions.create(
-                model=resolved_model,
+            response = _get_client(api_model).chat.completions.create(
+                model=api_model,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=1,
                 logprobs=True,
@@ -431,10 +519,10 @@ def get_self_verification_score(problem: str, code: str, model: str):
             logger.info("self-verification logprobs path failed, falling back: %s", e)
             if mode == "logprobs":
                 return 0.5
-    if provider != "bedrock" and mode in ("auto", "json"):
+    if provider not in ("bedrock", "anthropic") and mode in ("auto", "json"):
         try:
-            response = _get_client(resolved_model).chat.completions.create(
-                model=resolved_model,
+            response = _get_client(api_model).chat.completions.create(
+                model=api_model,
                 messages=[
                     {
                         "role": "user",
