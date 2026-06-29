@@ -34,13 +34,9 @@ GEMINI_API_KEY_ENV = "GEMINI_API_KEY"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 
-# Bedrock reasoning toggle fields (edit here if console/API shape differs)
-BEDROCK_REASONING_ON: dict[str, Any] = {
-    "reasoning_config": {"type": "enabled", "budget_tokens": 2048},
-}
-BEDROCK_REASONING_OFF: dict[str, Any] = {
-    "reasoning_config": {"type": "disabled"},
-}
+# Bedrock reasoning toggle defaults (Qwen3 / DeepSeek-V3.1 use reasoning_effort)
+BEDROCK_REASONING_EFFORT_ON: dict[str, Any] = {"reasoning_effort": "medium"}
+BEDROCK_REASONING_EFFORT_OFF: dict[str, Any] = {"reasoning_effort": "none"}
 
 # Self-verification strategy:
 # - "text": single cheap Yes/No request (best for Gemini free tier).
@@ -93,7 +89,7 @@ MODELS_BEDROCK = [
 
 # Production model registry: label is the canonical id passed through the pipeline.
 # route: bedrock | anthropic | (legacy openrouter/gemini via run.py MODELS)
-# reasoning: None | "on" | "off" — applied via BEDROCK_REASONING_* for Bedrock entries
+# reasoning: None | "on" | "off" — Bedrock additionalModelRequestFields via get_reasoning_fields
 MODEL_CONFIGS: list[dict[str, Any]] = [
     {
         "label": "gemma-3-12b-it",
@@ -108,6 +104,8 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "route": "bedrock",
         "model_id": "qwen.qwen3-32b-v1:0",
         "reasoning": "off",
+        "reasoning_fields_off": {"reasoning_effort": "none"},
+        "reasoning_fields_on": {"reasoning_effort": "medium"},
         "price_in": 0.30,
         "price_out": 0.50,
     },
@@ -124,6 +122,8 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "route": "bedrock",
         "model_id": "deepseek.v3-v1:0",
         "reasoning": "off",
+        "reasoning_fields_off": {"reasoning_effort": "none"},
+        "reasoning_fields_on": {"reasoning_effort": "medium"},
         "price_in": 0.62,
         "price_out": 1.85,
     },
@@ -132,6 +132,8 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "route": "bedrock",
         "model_id": "deepseek.v3-v1:0",
         "reasoning": "on",
+        "reasoning_fields_off": {"reasoning_effort": "none"},
+        "reasoning_fields_on": {"reasoning_effort": "medium"},
         "price_in": 0.62,
         "price_out": 1.85,
     },
@@ -147,7 +149,8 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "label": "deepseek-r1",
         "route": "bedrock",
         "model_id": "us.deepseek.r1-v1:0",
-        "reasoning": "on",
+        # R1 is always-reasoning; sending toggle fields causes ValidationException
+        "reasoning": None,
         "price_in": 1.35,
         "price_out": 5.40,
     },
@@ -170,22 +173,25 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
 ]
 
 
-def get_reasoning_fields(reasoning: str | None) -> dict[str, Any] | None:
+def get_reasoning_fields(cfg: dict[str, Any]) -> dict[str, Any] | None:
     """
-    Map a reasoning toggle value to Bedrock additionalModelRequestFields.
+    Map a model registry entry to Bedrock additionalModelRequestFields.
 
     Args:
-        reasoning: None, "on", or "off".
+        cfg: Model registry entry with optional reasoning and per-model overrides.
 
     Returns:
         Dict for additionalModelRequestFields, or None when not applicable.
     """
+    reasoning = cfg.get("reasoning")
     if reasoning is None:
         return None
     if reasoning == "on":
-        return BEDROCK_REASONING_ON
+        override = cfg.get("reasoning_fields_on")
+        return override if override is not None else BEDROCK_REASONING_EFFORT_ON
     if reasoning == "off":
-        return BEDROCK_REASONING_OFF
+        override = cfg.get("reasoning_fields_off")
+        return override if override is not None else BEDROCK_REASONING_EFFORT_OFF
     return None
 
 

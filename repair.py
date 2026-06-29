@@ -138,7 +138,7 @@ def _resolve_call_context(
         return (
             str(cfg["route"]),
             str(cfg["model_id"]),
-            get_reasoning_fields(cfg.get("reasoning")),
+            get_reasoning_fields(cfg),
             float(cfg.get("price_in", 0.0)),
             float(cfg.get("price_out", 0.0)),
             label,
