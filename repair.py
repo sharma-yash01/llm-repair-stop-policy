@@ -122,22 +122,25 @@ def _resolve_model_name(model: str):
 
 def _resolve_call_context(
     model: str,
-) -> tuple[str, str, dict[str, Any] | None, float, float, str, int | None]:
+) -> tuple[str, str, dict[str, Any] | None, float, float, str, int | None, int | None]:
     """
-    Resolve route, API model id, reasoning fields, pricing, log label, and max tokens.
+    Resolve route, API model id, reasoning fields, pricing, log label, max tokens,
+    and read timeout.
 
     Args:
         model: Registry label or legacy model id.
 
     Returns:
         Tuple of (route, api_model_id, reasoning_fields, price_in, price_out,
-        log_label, max_tokens).
+        log_label, max_tokens, read_timeout_sec).
     """
     label = (model or "").strip()
     cfg = get_model_config(label)
     if cfg is not None:
         max_tokens = cfg.get("max_tokens")
         max_tokens = int(max_tokens) if max_tokens is not None else None
+        read_timeout = cfg.get("read_timeout_sec")
+        read_timeout = int(read_timeout) if read_timeout is not None else None
         return (
             str(cfg["route"]),
             str(cfg["model_id"]),
@@ -146,10 +149,11 @@ def _resolve_call_context(
             float(cfg.get("price_out", 0.0)),
             label,
             max_tokens,
+            read_timeout,
         )
     api_model = _resolve_model_name(model)
     provider = _legacy_provider_for(api_model)
-    return provider, api_model, None, 0.0, 0.0, api_model, None
+    return provider, api_model, None, 0.0, 0.0, api_model, None, None
 
 
 def _estimate_cost_usd(
@@ -276,7 +280,7 @@ def call_llm(
         RuntimeError: If running cost exceeds COST_HARD_STOP_USD.
     """
     global running_cost_usd
-    route, api_model, reasoning_fields, price_in, price_out, log_label, max_tokens = (
+    route, api_model, reasoning_fields, price_in, price_out, log_label, max_tokens, read_timeout = (
         _resolve_call_context(model)
     )
     if running_cost_usd >= COST_HARD_STOP_USD:
@@ -290,6 +294,7 @@ def call_llm(
                 request_messages,
                 max_tokens=max_tokens,
                 additional_request_fields=reasoning_fields,
+                read_timeout_sec=read_timeout,
             )
         except Exception as e:
             logger.exception("call_llm bedrock failed: %s", e)
@@ -502,7 +507,7 @@ def get_self_verification_score(problem: str, code: str, model: str):
     )
     mode = (SELF_VERIFICATION_MODE or "auto").strip().lower()
     provider = _provider_for(model)
-    _, api_model, _, _, _, _, _ = _resolve_call_context(model)
+    _, api_model, _, _, _, _, _, _ = _resolve_call_context(model)
     if provider not in ("bedrock", "anthropic") and mode in ("auto", "logprobs"):
         try:
             response = _get_client(api_model).chat.completions.create(

@@ -42,6 +42,11 @@ BEDROCK_REASONING_EFFORT_OFF: dict[str, Any] = {"reasoning_effort": "none"}
 BEDROCK_DEFAULT_MAX_TOKENS = 4096
 # R1 is always-reasoning; 4096 is exhausted by thinking before answer text is emitted.
 BEDROCK_R1_MAX_TOKENS = int(os.environ.get("BEDROCK_R1_MAX_TOKENS", "16384"))
+# Bedrock boto3 read timeout (default 60s is too short for R1 reasoning calls).
+BEDROCK_DEFAULT_READ_TIMEOUT_SEC = int(
+    os.environ.get("BEDROCK_DEFAULT_READ_TIMEOUT_SEC", "120")
+)
+BEDROCK_R1_READ_TIMEOUT_SEC = int(os.environ.get("BEDROCK_R1_READ_TIMEOUT_SEC", "900"))
 
 # Self-verification strategy:
 # - "text": single cheap Yes/No request (best for Gemini free tier).
@@ -151,16 +156,6 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "price_out": 5.00,
     },
     {
-        "label": "deepseek-r1",
-        "route": "bedrock",
-        "model_id": "us.deepseek.r1-v1:0",
-        # R1 is always-reasoning; sending toggle fields causes ValidationException
-        "reasoning": None,
-        "max_tokens": BEDROCK_R1_MAX_TOKENS,
-        "price_in": 1.35,
-        "price_out": 5.40,
-    },
-    {
         "label": "claude-sonnet-4.6",
         "route": "anthropic",
         "model_id": "claude-sonnet-4-6",
@@ -175,6 +170,17 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "reasoning": None,
         "price_in": 5.00,
         "price_out": 25.00,
+    },
+    {
+        "label": "deepseek-r1",
+        "route": "bedrock",
+        "model_id": "us.deepseek.r1-v1:0",
+        # R1 is always-reasoning; sending toggle fields causes ValidationException
+        "reasoning": None,
+        "max_tokens": BEDROCK_R1_MAX_TOKENS,
+        "read_timeout_sec": BEDROCK_R1_READ_TIMEOUT_SEC,
+        "price_in": 1.35,
+        "price_out": 5.40,
     },
 ]
 

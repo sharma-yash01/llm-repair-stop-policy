@@ -6,21 +6,30 @@ import logging
 from typing import Any
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config import AWS_REGION, BEDROCK_DEFAULT_MAX_TOKENS
+from config import AWS_REGION, BEDROCK_DEFAULT_MAX_TOKENS, BEDROCK_DEFAULT_READ_TIMEOUT_SEC
 
 logger = logging.getLogger(__name__)
-_client: Any | None = None
+_clients: dict[int, Any] = {}
 
 
-def _get_bedrock_client():
-    """Return a lazily initialized bedrock-runtime client."""
-    global _client
-    if _client is None:
-        _client = boto3.client("bedrock-runtime", region_name=AWS_REGION)
-    return _client
+def _get_bedrock_client(read_timeout_sec: int | None = None):
+    """Return a lazily initialized bedrock-runtime client for the given read timeout."""
+    timeout = read_timeout_sec or BEDROCK_DEFAULT_READ_TIMEOUT_SEC
+    if timeout not in _clients:
+        _clients[timeout] = boto3.client(
+            "bedrock-runtime",
+            region_name=AWS_REGION,
+            config=Config(
+                read_timeout=timeout,
+                connect_timeout=10,
+                retries={"max_attempts": 0},
+            ),
+        )
+    return _clients[timeout]
 
 
 def _to_converse_messages(
@@ -80,25 +89,14 @@ def _extract_text(response: dict[str, Any]) -> str | None:
     return None
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
-def bedrock_chat(
+def _bedrock_converse(
     model_id: str,
     messages: list[dict[str, str]],
-    max_tokens: int | None = None,
-    additional_request_fields: dict[str, Any] | None = None,
+    max_tokens: int | None,
+    additional_request_fields: dict[str, Any] | None,
+    read_timeout_sec: int | None,
 ) -> tuple[str | None, int, int]:
-    """
-    Call Bedrock Converse API with OpenAI-style messages.
-
-    Args:
-        model_id: Bedrock model ID (e.g. anthropic.claude-3-5-haiku-20241022-v1:0).
-        messages: OpenAI-style message list.
-        max_tokens: Optional max output tokens.
-        additional_request_fields: Optional reasoning/toggle fields for Converse.
-
-    Returns:
-        Tuple of (assistant text or None, input_tokens, output_tokens).
-    """
+    """Single Bedrock Converse call (no retry)."""
     converse_messages, system = _to_converse_messages(messages)
     if not converse_messages:
         raise ValueError("bedrock_chat requires at least one user/assistant message")
@@ -114,7 +112,7 @@ def bedrock_chat(
         kwargs["additionalModelRequestFields"] = additional_request_fields
 
     try:
-        response = _get_bedrock_client().converse(**kwargs)
+        response = _get_bedrock_client(read_timeout_sec).converse(**kwargs)
     except (ClientError, BotoCoreError) as e:
         logger.exception("bedrock_chat failed model=%s: %s", model_id, e)
         raise
@@ -129,3 +127,39 @@ def bedrock_chat(
         output_tokens,
     )
     return _extract_text(response), input_tokens, output_tokens
+
+
+def bedrock_chat(
+    model_id: str,
+    messages: list[dict[str, str]],
+    max_tokens: int | None = None,
+    additional_request_fields: dict[str, Any] | None = None,
+    read_timeout_sec: int | None = None,
+) -> tuple[str | None, int, int]:
+    """
+    Call Bedrock Converse API with OpenAI-style messages.
+
+    Args:
+        model_id: Bedrock model ID (e.g. anthropic.claude-3-5-haiku-20241022-v1:0).
+        messages: OpenAI-style message list.
+        max_tokens: Optional max output tokens.
+        additional_request_fields: Optional reasoning/toggle fields for Converse.
+        read_timeout_sec: Optional HTTP read timeout override.
+
+    Returns:
+        Tuple of (assistant text or None, input_tokens, output_tokens).
+    """
+    timeout = read_timeout_sec or BEDROCK_DEFAULT_READ_TIMEOUT_SEC
+    wait_max = 60 if timeout >= 600 else 10
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=wait_max))
+    def _call() -> tuple[str | None, int, int]:
+        return _bedrock_converse(
+            model_id,
+            messages,
+            max_tokens,
+            additional_request_fields,
+            read_timeout_sec,
+        )
+
+    return _call()
