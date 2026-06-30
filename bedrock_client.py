@@ -9,11 +9,9 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config import AWS_REGION
+from config import AWS_REGION, BEDROCK_DEFAULT_MAX_TOKENS
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_MAX_TOKENS = 4096
 _client: Any | None = None
 
 
@@ -58,10 +56,25 @@ def _extract_text(response: dict[str, Any]) -> str | None:
     """Extract assistant text from a Converse response."""
     try:
         content_blocks = response["output"]["message"]["content"]
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         for block in content_blocks:
             text = block.get("text", "")
             if isinstance(text, str) and text.strip():
-                return text.strip()
+                text_parts.append(text.strip())
+                continue
+            reasoning = block.get("reasoningContent")
+            if isinstance(reasoning, dict):
+                reasoning_text = reasoning.get("reasoningText", {})
+                if isinstance(reasoning_text, dict):
+                    chunk = reasoning_text.get("text", "")
+                    if isinstance(chunk, str) and chunk.strip():
+                        reasoning_parts.append(chunk.strip())
+        if text_parts:
+            return "\n".join(text_parts)
+        if reasoning_parts:
+            logger.warning("bedrock_response_reasoning_only_no_text_block")
+            return "\n".join(reasoning_parts)
     except (KeyError, TypeError, IndexError) as e:
         logger.warning("bedrock_empty_or_malformed_response %s", e)
     return None
@@ -93,7 +106,7 @@ def bedrock_chat(
     kwargs: dict[str, Any] = {
         "modelId": model_id,
         "messages": converse_messages,
-        "inferenceConfig": {"maxTokens": max_tokens or _DEFAULT_MAX_TOKENS},
+        "inferenceConfig": {"maxTokens": max_tokens or BEDROCK_DEFAULT_MAX_TOKENS},
     }
     if system is not None:
         kwargs["system"] = system

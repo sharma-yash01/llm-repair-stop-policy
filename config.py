@@ -38,6 +38,11 @@ ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
 BEDROCK_REASONING_EFFORT_ON: dict[str, Any] = {"reasoning_effort": "medium"}
 BEDROCK_REASONING_EFFORT_OFF: dict[str, Any] = {"reasoning_effort": "none"}
 
+# Bedrock Converse maxTokens (router default; R1 needs headroom for reasoning blocks).
+BEDROCK_DEFAULT_MAX_TOKENS = 4096
+# R1 is always-reasoning; 4096 is exhausted by thinking before answer text is emitted.
+BEDROCK_R1_MAX_TOKENS = int(os.environ.get("BEDROCK_R1_MAX_TOKENS", "16384"))
+
 # Self-verification strategy:
 # - "text": single cheap Yes/No request (best for Gemini free tier).
 # - "auto": logprobs -> JSON -> text fallback.
@@ -151,6 +156,7 @@ MODEL_CONFIGS: list[dict[str, Any]] = [
         "model_id": "us.deepseek.r1-v1:0",
         # R1 is always-reasoning; sending toggle fields causes ValidationException
         "reasoning": None,
+        "max_tokens": BEDROCK_R1_MAX_TOKENS,
         "price_in": 1.35,
         "price_out": 5.40,
     },

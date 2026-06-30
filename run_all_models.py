@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import traceback
 from typing import Any
 
 import boto3
@@ -23,6 +25,8 @@ from data_lcb import get_problems
 from figures import generate_all_figures
 from run import _analyze_combo, _run_combo
 from strategies import STRATEGY_REGISTRY
+
+logger = logging.getLogger(__name__)
 
 
 def _has_aws_credentials() -> bool:
@@ -153,6 +157,7 @@ def main() -> None:
         "strategy": strategy_name,
         "runs": [],
         "skipped": [],
+        "failed": [],
     }
 
     for cfg in configs:
@@ -164,22 +169,37 @@ def main() -> None:
             continue
 
         print(f"Running {label} via {cfg['route']} (model_id={cfg['model_id']})")
-        if args.analyze_only:
-            from run import _load_combo_trajectories
+        try:
+            if args.analyze_only:
+                from run import _load_combo_trajectories
 
-            trajectories = _load_combo_trajectories(label, strategy_name)
-        else:
-            trajectories = _run_combo(label, strategy_name, problems)
-        info = _analyze_combo(label, strategy_name, trajectories)
-        run_report["runs"].append(
-            {
-                "model": label,
-                "route": cfg["route"],
-                "model_id": cfg["model_id"],
-                "strategy": strategy_name,
-                "summary_path": info["summary_path"],
-            }
-        )
+                trajectories = _load_combo_trajectories(label, strategy_name)
+            else:
+                trajectories = _run_combo(label, strategy_name, problems)
+            info = _analyze_combo(label, strategy_name, trajectories)
+            run_report["runs"].append(
+                {
+                    "model": label,
+                    "route": cfg["route"],
+                    "model_id": cfg["model_id"],
+                    "strategy": strategy_name,
+                    "summary_path": info["summary_path"],
+                }
+            )
+        except Exception as e:
+            err_msg = f"{type(e).__name__}: {e}"
+            logger.exception("Model run failed for %s", label)
+            print(f"FAILED {label}: {err_msg}")
+            run_report["failed"].append(
+                {
+                    "model": label,
+                    "route": cfg["route"],
+                    "model_id": cfg["model_id"],
+                    "error": err_msg,
+                    "traceback": traceback.format_exc(),
+                }
+            )
+            continue
 
     outputs = generate_all_figures("data/trajectories", RESULTS_DIR)
     run_report["figures"] = outputs
