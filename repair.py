@@ -151,9 +151,10 @@ def _resolve_call_context(
             max_tokens,
             read_timeout,
         )
-    api_model = _resolve_model_name(model)
-    provider = _legacy_provider_for(api_model)
-    return provider, api_model, None, 0.0, 0.0, api_model, None, None
+    raise RuntimeError(
+        f"Unknown model label: {label!r}. "
+        "Add to MODEL_CONFIGS or use run.py --adhoc-label with --route and --model-id."
+    )
 
 
 def _estimate_cost_usd(
@@ -179,11 +180,6 @@ def _estimate_cost_usd(
     return (prompt_tokens * price_in + completion_tokens * price_out) / 1_000_000.0
 
 
-def _legacy_provider_for(model: str) -> str:
-    provider, _, _ = _resolve_provider(model)
-    return provider
-
-
 def _provider_for(model: str) -> str:
     """
     Return resolved provider/route name for a model id.
@@ -198,7 +194,10 @@ def _provider_for(model: str) -> str:
     cfg = get_model_config(label)
     if cfg is not None:
         return str(cfg["route"])
-    return _legacy_provider_for(_resolve_model_name(model))
+    raise RuntimeError(
+        f"Unknown model label: {label!r}. "
+        "Add to MODEL_CONFIGS or use run.py --adhoc-label with --route and --model-id."
+    )
 
 
 def _get_client(model: str):
