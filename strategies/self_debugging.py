@@ -1,10 +1,16 @@
-"""Self-debugging strategy with explain-then-fix prompting."""
+"""Self-Debugging (UT + rubber-duck code explanation), zero-shot, fixed-budget.
+
+Harness-adapted from Chen et al. (ICLR 2024, arXiv:2304.05128): separate code
+explanation step then UT-feedback revision. Uses ground-truth test feedback and a
+linear fixed-step loop (not paper's early-stop on self-judged correctness).
+"""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
+from config import SELF_DEBUG_SEPARATE_EXPLANATION
 from repair import call_llm, generate_initial, strip_code_fences
 from strategies.base import (
     append_jsonl,
@@ -17,8 +23,58 @@ from strategies.base import (
 from strategies.direct_fix import MAX_REPAIR_HISTORY_MESSAGES, _trim_history, build_repair_prompt
 
 
+def _truncate_error(err: Any, max_chars: int = 1500) -> str:
+    """Truncate long error strings for prompts."""
+    text = str(err).strip()
+    return text[-max_chars:] if len(text) > max_chars else text
+
+
+def _build_code_explanation_prompt(
+    problem: str,
+    code: str,
+    test_results: dict[str, Any],
+) -> str:
+    """Prompt for rubber-duck code explanation (paper Explanation step)."""
+    errors = "\n".join(_truncate_error(err) for err in test_results.get("error_types", [])[:5])
+    errors = errors or "No errors captured"
+    passed = test_results.get("passed", 0)
+    total = test_results.get("total", 0)
+    return f"""Problem:
+{problem}
+
+Current code:
+```python
+{code}
+```
+
+Execution result: {passed}/{total} tests pass.
+Observed failures:
+{errors}
+
+Explain the current code line by line: describe what each part does and how it
+relates to the problem specification. Compare your explanation to what the
+problem requires and identify any discrepancy between intended and actual
+behavior. Do not write corrected code yet."""
+
+
+def _build_revision_prompt(
+    problem: str,
+    code: str,
+    test_results: dict[str, Any],
+    code_explanation: str,
+    problem_dict: dict[str, Any] | None = None,
+) -> str:
+    """UT feedback revision prompt augmented with the model's code explanation."""
+    base = build_repair_prompt(problem, code, test_results, problem_dict=problem_dict)
+    return (
+        f"{base}\n\nYour prior code explanation:\n{code_explanation}\n\n"
+        "Using your explanation and the test feedback above, write the corrected "
+        "Python code. Return ONLY the fixed Python code, no explanation."
+    )
+
+
 def _split_explanation_and_code(raw: str) -> tuple[str, str]:
-    """Extract explanation and code block from a mixed response."""
+    """Extract explanation and code block from a mixed response (fallback path)."""
     pattern = re.compile(r"```(?:python)?\s*\n(.*?)```", re.DOTALL)
     match = pattern.search(raw)
     if not match:
@@ -29,7 +85,7 @@ def _split_explanation_and_code(raw: str) -> tuple[str, str]:
 
 
 class SelfDebuggingStrategy:
-    """Explain-first then patch strategy."""
+    """Self-Debugging (UT + rubber-duck code explanation), zero-shot, fixed-budget."""
 
     strategy_name = "self_debugging"
 
@@ -77,11 +133,42 @@ class SelfDebuggingStrategy:
             if step_number >= max_eval_steps - 1:
                 continue
 
-            repair_prompt = (
-                build_repair_prompt(problem, code, emission.test_results, problem_dict=problem_dict)
-                + "\n\nFirst explain what went wrong and why in 2-3 sentences. "
-                + "Then write the corrected code."
-            )
+            code_explanation = ""
+            if SELF_DEBUG_SEPARATE_EXPLANATION:
+                explanation_prompt = _build_code_explanation_prompt(
+                    problem,
+                    code,
+                    emission.test_results,
+                )
+                code_explanation = (call_llm(explanation_prompt, model) or "").strip()
+                append_jsonl(
+                    meta_path,
+                    {
+                        "step_number": step_number,
+                        "phase": "explanation",
+                        "code_explanation": code_explanation,
+                        "separate_explanation": True,
+                    },
+                )
+                repair_prompt = _build_revision_prompt(
+                    problem,
+                    code,
+                    emission.test_results,
+                    code_explanation or "(no explanation generated)",
+                    problem_dict=problem_dict,
+                )
+            else:
+                repair_prompt = (
+                    build_repair_prompt(
+                        problem,
+                        code,
+                        emission.test_results,
+                        problem_dict=problem_dict,
+                    )
+                    + "\n\nFirst explain the current code line by line, then write "
+                    + "the corrected code."
+                )
+
             message_history.append({"role": "user", "content": repair_prompt})
             request_history = _trim_history(message_history, MAX_REPAIR_HISTORY_MESSAGES)
             raw = call_llm(repair_prompt, model, messages=request_history)
@@ -92,11 +179,32 @@ class SelfDebuggingStrategy:
                 if message_history and message_history[-1].get("role") == "user":
                     message_history.pop()
                 next_step_llm_null = True
-                append_jsonl(meta_path, {"step_number": step_number, "explanation": "", "null_response": True})
+                append_jsonl(
+                    meta_path,
+                    {
+                        "step_number": step_number,
+                        "phase": "revision",
+                        "code_explanation": code_explanation,
+                        "null_response": True,
+                    },
+                )
                 continue
 
-            explanation, code = _split_explanation_and_code(raw)
-            append_jsonl(meta_path, {"step_number": step_number, "explanation": explanation, "null_response": False})
+            if SELF_DEBUG_SEPARATE_EXPLANATION:
+                revised_code = strip_code_fences(raw)
+            else:
+                explanation, revised_code = _split_explanation_and_code(raw)
+                code_explanation = explanation
+            append_jsonl(
+                meta_path,
+                {
+                    "step_number": step_number,
+                    "phase": "revision",
+                    "code_explanation": code_explanation,
+                    "null_response": False,
+                },
+            )
+            code = revised_code
             message_history.append({"role": "assistant", "content": code})
             message_history = _trim_history(message_history, MAX_REPAIR_HISTORY_MESSAGES)
             next_step_llm_null = False

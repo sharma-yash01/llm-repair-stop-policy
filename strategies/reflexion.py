@@ -1,10 +1,17 @@
-"""Reflexion strategy with verbal memory accumulation."""
+"""Reflexion-faithful verbal reflection over a linear, ground-truth-evaluated loop.
+
+Harness-adapted from Shinn et al. (NeurIPS 2023, arXiv:2303.11366): separate
+self-reflection (M_sr) with bounded episodic memory, conditioned on prior
+reflections + execution feedback. Intentional deviations for characterization
+harness: ground-truth tests as evaluator (not self-generated tests) and no
+episodic trial/reset (linear fixed-step loop).
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from config import PASS_THRESHOLD
+from config import PASS_THRESHOLD, REFLEXION_MEMORY_LIMIT
 from repair import call_llm, generate_initial, strip_code_fences
 from strategies.base import (
     append_jsonl,
@@ -17,10 +24,37 @@ from strategies.base import (
 from strategies.direct_fix import MAX_REPAIR_HISTORY_MESSAGES, _trim_history, build_repair_prompt
 
 
-def _build_reflection_prompt(problem: str, code: str, error_types: list[str]) -> str:
-    """Prompt model for concise lesson learned."""
-    errors = "\n".join(error_types[:5]) or "No errors captured"
-    return f"""Problem:
+def _truncate_error(err: Any, max_chars: int = 1500) -> str:
+    """Truncate long error strings for prompts."""
+    text = str(err).strip()
+    return text[-max_chars:] if len(text) > max_chars else text
+
+
+def _memory_window(reflections: list[str]) -> list[str]:
+    """Return the bounded reflection memory window (paper Omega=1-3)."""
+    if REFLEXION_MEMORY_LIMIT <= 0:
+        return []
+    return reflections[-REFLEXION_MEMORY_LIMIT:]
+
+
+def _build_reflection_prompt(
+    problem: str,
+    code: str,
+    test_results: dict[str, Any],
+    prior_reflections: list[str],
+) -> str:
+    """Paper-faithful self-reflection prompt (M_sr): credit assignment + memory."""
+    errors = "\n".join(
+        _truncate_error(err) for err in test_results.get("error_types", [])[:5]
+    )
+    errors = errors or "No errors captured"
+    passed = test_results.get("passed", 0)
+    total = test_results.get("total", 0)
+    memory = "\n".join(f"- {r}" for r in _memory_window(prior_reflections))
+    memory_block = memory if memory else "- (none yet)"
+    return f"""You are reflecting on a failed code repair attempt.
+
+Problem:
 {problem}
 
 Current code:
@@ -28,10 +62,17 @@ Current code:
 {code}
 ```
 
+Execution result: {passed}/{total} tests pass.
 Observed failures:
 {errors}
 
-Reflect on what went wrong. Summarize one concrete fix insight in 1-2 sentences."""
+Past reflections from earlier attempts:
+{memory_block}
+
+Write a first-person reflection in 2-4 sentences. Identify what specifically
+caused the failure (credit assignment), what you should do differently on the
+next attempt, and how to avoid repeating mistakes noted in past reflections.
+Do not write code."""
 
 
 def _build_reflexion_repair_prompt(
@@ -41,17 +82,18 @@ def _build_reflexion_repair_prompt(
     reflections: list[str],
     problem_dict: dict[str, Any] | None = None,
 ) -> str:
-    """Extend direct-fix prompt with accumulated reflections."""
-    memory = "\n".join(f"- {r}" for r in reflections[-5:]) if reflections else "- (none yet)"
+    """Extend direct-fix prompt with bounded reflection memory."""
+    memory = "\n".join(f"- {r}" for r in _memory_window(reflections))
+    memory_block = memory if memory else "- (none yet)"
     return (
         build_repair_prompt(problem, code, test_results, problem_dict=problem_dict)
-        + f"\n\nPast reflections:\n{memory}\n"
+        + f"\n\nPast reflections:\n{memory_block}\n"
         + "Use these reflections to avoid repeated mistakes."
     )
 
 
 class ReflexionStrategy:
-    """Direct-fix loop augmented with reflection memory."""
+    """Reflexion-faithful verbal reflection + bounded memory over linear repair."""
 
     strategy_name = "reflexion"
 
@@ -104,7 +146,8 @@ class ReflexionStrategy:
                         _build_reflection_prompt(
                             problem,
                             code,
-                            emission.test_results.get("error_types", []),
+                            emission.test_results,
+                            reflections,
                         ),
                         model,
                     )
@@ -118,7 +161,7 @@ class ReflexionStrategy:
                 {
                     "step_number": step_number,
                     "reflection": latest_reflection,
-                    "accumulated_reflections": reflections[-5:],
+                    "accumulated_reflections": _memory_window(reflections),
                 },
             )
 

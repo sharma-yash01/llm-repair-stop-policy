@@ -60,6 +60,10 @@ LCB_RELEASE = "release_v1"
 # Only include problems with this difficulty or harder (easy | medium | hard)
 LCB_MIN_DIFFICULTY = "easy"
 PASS_THRESHOLD = 0.8  # Oracle-First binary solve threshold
+# EXTENSION POINT: Reflexion episodic memory window (paper Omega=1-3).
+REFLEXION_MEMORY_LIMIT = 3
+# EXTENSION POINT: Self-Debugging rubber-duck explanation as separate LLM call.
+SELF_DEBUG_SEPARATE_EXPLANATION = True
 IMPROVEMENT_THRESHOLD = 0.05
 SUBPROCESS_TIMEOUT = 10
 RATE_LIMIT_SLEEP = float(os.environ.get("RATE_LIMIT_SLEEP", "2"))
